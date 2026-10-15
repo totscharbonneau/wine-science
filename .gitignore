@@ -1,0 +1,13 @@
+# Scraped SAQ data (not redistributable)
+data/
+
+# Private scraper and notes (kept local for now)
+scraper/
+HANDOFF.md
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
