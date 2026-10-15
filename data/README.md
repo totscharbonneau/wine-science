@@ -18,7 +18,7 @@ data/
 |---|---|---|
 | `raw/saq.db` | `scraper/saq_scraper.py` (local, not in the repo) | Read-only between scrapes. Wine attributes are stored as a JSON blob in `products.data`. |
 | `processed/winescience.duckdb` | `uv run python -m src.data.build_db` | Rebuilt from scratch on every run. |
-| `processed/wine_groups_<method>.parquet` | `uv run python -m src.data.group_wines --method npc` | Run after the build. Reads the database read-only. |
+| `processed/wine_groups_<method>.parquet` | `uv run python -m src.data.group_wines --method npc` (or `npcg`) | Run after the build. Reads the database read-only. |
 
 Scrape dates: 2026-09-30 to 2026-10-15. Row counts below are from the 2026-10-15 build and
 will change with a re-scrape.
@@ -142,6 +142,7 @@ Methods are listed in the `METHODS` registry in `src/data/group_wines.py`:
 | Method | Key |
 |---|---|
 | `npc` | normalized name + producer + color. Bottle volume and descriptions are never part of the key, so vintages and magnums of one wine share a group, while a red and a white with the same name do not. |
+| `npcg` | `npc` key + normalized primary grape (`grape_primary`: accents, case, hyphens and spacing folded; "Cabernet" = "Cabernet-sauvignon"; also Shiraz = Syrah, Sangiovese grosso = Sangiovese, Tinto fino = Tempranillo, Maccabeu = Macabeo; the placeholder "Autre (s) cépage (s)" counts as no grape). A SKU with no grape joins its siblings' group when they agree on exactly one grape; stays with other grape-less SKUs when no sibling has a grape; stays in its own sub-group, and is counted as ambiguous in the run output, when siblings disagree. |
 
 ## Known limitations
 

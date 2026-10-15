@@ -106,6 +106,130 @@ def test_registry_describes_npc():
     assert METHODS["npc"]
 
 
+# sku, name, producer, color, grape_primary
+GRAPE_WINES = [
+    # two grapes under one name/producer/color -> separate groups; variants of one grape merge
+    ("g1", "Cuvee", "Dom A", "Rouge", "Merlot"),
+    ("g2", "Cuvee", "Dom A", "Rouge", "Merlot"),
+    ("g3", "Cuvee", "Dom A", "Rouge", "Syrah"),
+    ("g4", "Cuvee", "Dom A", "Rouge", "Cabernet"),
+    ("g5", "Cuvee", "Dom A", "Rouge", "Cabernet-sauvignon"),
+    ("g6", "Cuvee", "Dom A", "Rouge", " CABERNET  Sauvignon "),
+    # NULL grape with exactly one grape among siblings -> attaches
+    ("a1", "Attach", "Dom B", "Blanc", "Chardonnay"),
+    ("a2", "Attach", "Dom B", "Blanc", None),
+    ("a3", "Attach", "Dom B", "Blanc", "chardonnay"),
+    # no sibling has a grape -> NULLs stay together
+    ("n1", "Nothing", "Dom C", "Rouge", None),
+    ("n2", "Nothing", "Dom C", "Rouge", None),
+    # siblings disagree -> NULL SKU not attached to either
+    ("d1", "Disagree", "Dom D", "Rouge", "Merlot"),
+    ("d2", "Disagree", "Dom D", "Rouge", "Syrah"),
+    ("d3", "Disagree", "Dom D", "Rouge", None),
+    # two NULL SKUs among disagreeing siblings share one sub-group, apart from the grape groups
+    ("d4", "Disagree", "Dom D", "Rouge", None),
+    # attaching never crosses the base group (other color)
+    ("o1", "Attach", "Dom B", "Rouge", "Pinot noir"),
+    # more variants of one grape
+    ("v1", "Variants", "Dom V", "Rouge", "Syrah"),
+    ("v2", "Variants", "Dom V", "Rouge", "Shiraz"),
+    ("v3", "Variants", "Dom I", "Rouge", "Sangiovese"),
+    ("v4", "Variants", "Dom I", "Rouge", "Sangiovese grosso"),
+    ("v5", "Variants", "Dom T", "Rouge", "Tempranillo"),
+    ("v6", "Variants", "Dom T", "Rouge", "Tinto fino"),
+    ("v7", "Variants", "Dom M", "Blanc", "Macabeo"),
+    ("v8", "Variants", "Dom M", "Blanc", "Maccabeu"),
+    # junk placeholder is not a grape: it attaches like a NULL
+    ("j1", "Junk", "Dom J", "Rouge", "Grenache"),
+    ("j2", "Junk", "Dom J", "Rouge", "Autre (s) cépage (s)"),
+]
+
+
+@pytest.fixture
+def grape_db(tmp_path):
+    path = tmp_path / "grapes.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE wines (sku VARCHAR, name VARCHAR, producer VARCHAR, color VARCHAR,"
+        " volume_ml INTEGER, description VARCHAR, grape_primary VARCHAR)"
+    )
+    con.executemany(
+        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,?)", GRAPE_WINES
+    )
+    con.close()
+    return path
+
+
+def npcg_mapping(grape_db, tmp_path):
+    return mapping(grape_db, tmp_path / "out", "npcg")[0]
+
+
+def test_npcg_registered_and_file_named(grape_db, tmp_path):
+    assert METHODS["npcg"]
+    _, out = mapping(grape_db, tmp_path / "out", "npcg")
+    assert out.name == "wine_groups_npcg.parquet"
+
+
+def test_npcg_different_grapes_split(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["g1"][0] == m["g2"][0]
+    assert m["g1"][0] != m["g3"][0]
+    assert m["g1"][0] != m["g4"][0]
+
+
+def test_npcg_grape_variants_do_not_split(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["g4"][0] == m["g5"][0] == m["g6"][0]
+    assert m["a1"][0] == m["a3"][0]
+
+
+def test_npcg_more_grape_variants_merge(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    for a, b in [("v1", "v2"), ("v3", "v4"), ("v5", "v6"), ("v7", "v8")]:
+        assert m[a][0] == m[b][0]
+
+
+def test_npcg_junk_grape_treated_as_missing(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["j2"][0] == m["j1"][0]
+
+
+def test_npcg_null_attaches_to_single_sibling_grape(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["a2"][0] == m["a1"][0]
+    assert m["a2"][1] == m["a1"][1]
+
+
+def test_npcg_null_stay_together_without_grape_siblings(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["n1"][0] == m["n2"][0]
+
+
+def test_npcg_null_stays_apart_when_siblings_disagree(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["d3"][0] == m["d4"][0]
+    assert m["d3"][0] not in {m["d1"][0], m["d2"][0]}
+    assert m["d3"][1] == "disagree|dom d|rouge|"
+
+
+def test_npcg_never_merges_across_base_groups(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["o1"][0] != m["a1"][0]
+
+
+def test_npcg_key_is_npc_key_plus_grape(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["g4"][1] == "cuvee|dom a|rouge|cabernet sauvignon"
+    assert m["n1"][1] == "nothing|dom c|rouge|"
+
+
+def test_npcg_reports_no_grape_outcomes(grape_db, tmp_path, capsys):
+    mapping(grape_db, tmp_path / "out", "npcg")
+    out = capsys.readouterr().out
+    # a2 and the junk-grape j2 attach; n1/n2 stay together; d3/d4 are ambiguous
+    assert "2 attached to siblings, 2 kept together, 2 ambiguous" in out
+
+
 def test_unknown_method_rejected(db, tmp_path):
     with pytest.raises(ValueError, match="nope"):
         group_wines(db, tmp_path / "out", "nope")
