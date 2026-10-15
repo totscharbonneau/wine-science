@@ -19,7 +19,7 @@ OUT_DIR = DATA_DIR / "processed"
 # Registry of grouping methods: name -> what the method means.
 METHODS = {
     "npc": "normalized name + producer + color. Bottle volume and descriptions are never in the key.",
-    "npcg": "npc + normalized primary grape. A SKU without a grape joins its siblings' grape when they agree on exactly one.",
+    "npcg": "npc + normalized lead grape (highest percentage, ties alphabetical). A SKU without a grape joins its siblings' grape when they agree on exactly one.",
 }
 
 
@@ -46,15 +46,30 @@ GRAPE_ALIASES = {
 JUNK_GRAPES = ("autre (s) cepage (s)",)
 
 
-# Normalized primary grape, NULL when absent (hyphens count as spaces).
-GRAPE_NORMALIZED = "nullif(" + norm("replace(grape_primary, '-', ' ')") + ", '')"
-
-
 def _grape_alias(col: str) -> str:
     """SQL expression mapping spelling variants in `col` to one canonical grape."""
     junk = ", ".join(f"'{j}'" for j in JUNK_GRAPES)
     whens = " ".join(f"WHEN '{a}' THEN '{b}'" for a, b in GRAPE_ALIASES.items())
     return f"CASE WHEN {col} IN ({junk}) THEN NULL ELSE CASE {col} {whens} ELSE {col} END END"
+
+
+def _grape_name(col: str) -> str:
+    """SQL expression for a grape name in `col`: normalized (hyphens count as spaces), aliased, NULL when absent."""
+    return _grape_alias("nullif(" + norm(f"replace({col}, '-', ' ')") + ", '')")
+
+
+# The lead grape of a blend: the highest percentage, ties broken alphabetically on the normalized
+# name, so the key does not depend on the order SAQ lists the grapes. A grape without a percentage
+# counts as 0. A placeholder ranks like any grape and, led by one, the blend has no known lead
+# (NULL), as when the placeholder is the only grape; it loses a tie to a real grape. A SKU without
+# a `grapes` string falls back to `grape_primary`. NULL when absent.
+_BLEND_PART = _grape_name("regexp_replace(x, '[0-9,. ]*%', '')")
+_BLEND_PCT = "coalesce(try_cast(regexp_extract(x, '([0-9]+) *%', 1) AS INTEGER), 0)"
+GRAPE_LEAD = f"""CASE WHEN grapes IS NULL THEN {_grape_name('grape_primary')} ELSE
+    list_sort(list_transform(string_split(grapes, ','),
+        x -> {{'neg_pct': -{_BLEND_PCT}, 'unknown': {_BLEND_PART} IS NULL, 'grape': {_BLEND_PART}}}
+    ))[1].grape
+END"""
 
 
 # Per-method SQL producing (sku, group_key, attached, kept_together, ambiguous). The last three
@@ -68,10 +83,8 @@ SELECT_SQL = {
         FROM wines
     """,
     "npcg": f"""
-        WITH normalized AS (
-            SELECT sku, {NPC_KEY} AS npc_key, {GRAPE_NORMALIZED} AS normalized_grape FROM wines
-        ), base AS (
-            SELECT sku, npc_key, {_grape_alias('normalized_grape')} AS grape FROM normalized
+        WITH base AS (
+            SELECT sku, {NPC_KEY} AS npc_key, {GRAPE_LEAD} AS grape FROM wines
         ), sib AS (
             SELECT *,
                 count(DISTINCT grape) OVER (PARTITION BY npc_key) AS n_grapes,
