@@ -144,6 +144,24 @@ GRAPE_WINES = [
     ("j2", "Junk", "Dom J", "Rouge", "Autre (s) cépage (s)"),
 ]
 
+# sku, name, producer, color, grapes. grape_primary is the first grape listed, as in the real data.
+BLEND_WINES = [
+    # same blend, listed in a different order for a 50/50 tie -> one group
+    ("t1", "Tie", "Dom T2", "Rouge", "Merlot 50 %, Syrah 50 %"),
+    ("t2", "Tie", "Dom T2", "Rouge", "Syrah 50 %, Merlot 50 %"),
+    # the highest percentage leads, wherever it is listed
+    ("p1", "Pct", "Dom P", "Rouge", "Syrah 40 %, Merlot 60 %"),
+    ("p2", "Pct", "Dom P", "Rouge", "Merlot 55 %, Syrah 45 %"),
+    # no percentages: the first grape listed leads; a tie is not needed
+    ("f1", "Plain", "Dom F", "Blanc", "Chardonnay"),
+    ("f2", "Plain", "Dom F", "Blanc", "Chardonnay 100 %"),
+    ("f3", "Plain", "Dom F", "Blanc", "Vidal 100 %, Autre (s) cépage (s)"),
+    ("f4", "Plain", "Dom F", "Blanc", "Vidal"),
+    # a placeholder with the top percentage means the lead grape is unknown: attach like a NULL
+    ("u1", "Unknown lead", "Dom U", "Rouge", "Grenache 100 %"),
+    ("u2", "Unknown lead", "Dom U", "Rouge", "Autre (s) cépage (s) 60 %, Mourvèdre 40 %"),
+]
+
 
 @pytest.fixture
 def grape_db(tmp_path):
@@ -151,10 +169,14 @@ def grape_db(tmp_path):
     con = duckdb.connect(str(path))
     con.execute(
         "CREATE TABLE wines (sku VARCHAR, name VARCHAR, producer VARCHAR, color VARCHAR,"
-        " volume_ml INTEGER, description VARCHAR, grape_primary VARCHAR)"
+        " volume_ml INTEGER, description VARCHAR, grape_primary VARCHAR, grapes VARCHAR)"
     )
     con.executemany(
-        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,?)", GRAPE_WINES
+        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,?,NULL)", GRAPE_WINES
+    )
+    con.executemany(
+        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,split_part(?, ' ', 1),?)",
+        [(*w, w[4]) for w in BLEND_WINES],
     )
     con.close()
     return path
@@ -212,6 +234,31 @@ def test_npcg_null_stays_apart_when_siblings_disagree(grape_db, tmp_path):
     assert m["d3"][1] == "disagree|dom d|rouge|"
 
 
+def test_npcg_tied_blend_does_not_depend_on_listing_order(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["t1"][0] == m["t2"][0]
+    assert m["t1"][1] == "tie|dom t2|rouge|merlot"
+
+
+def test_npcg_highest_percentage_leads(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["p1"][0] == m["p2"][0]
+    assert m["p1"][1] == "pct|dom p|rouge|merlot"
+
+
+def test_npcg_grapes_without_percentage_use_first_listed(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["f1"][0] == m["f2"][0]
+    assert m["f3"][0] == m["f4"][0]
+    assert m["f1"][0] != m["f3"][0]
+
+
+def test_npcg_placeholder_lead_is_not_replaced_by_a_minor_grape(grape_db, tmp_path):
+    m = npcg_mapping(grape_db, tmp_path)
+    assert m["u2"][0] == m["u1"][0]
+    assert m["u2"][1] == m["u1"][1]
+
+
 def test_npcg_never_merges_across_base_groups(grape_db, tmp_path):
     m = npcg_mapping(grape_db, tmp_path)
     assert m["o1"][0] != m["a1"][0]
@@ -226,8 +273,8 @@ def test_npcg_key_is_npc_key_plus_grape(grape_db, tmp_path):
 def test_npcg_reports_no_grape_outcomes(grape_db, tmp_path, capsys):
     mapping(grape_db, tmp_path / "out", "npcg")
     out = capsys.readouterr().out
-    # a2 and the junk-grape j2 attach; n1/n2 stay together; d3/d4 are ambiguous
-    assert "2 attached to siblings, 2 kept together, 2 ambiguous" in out
+    # a2, the junk-grape j2 and the placeholder-led u2 attach; n1/n2 stay together; d3/d4 are ambiguous
+    assert "3 attached to siblings, 2 kept together, 2 ambiguous" in out
 
 
 def test_unknown_method_rejected(db, tmp_path):
