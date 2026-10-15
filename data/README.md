@@ -58,7 +58,11 @@ con.sql("SELECT color, count(*), median(price) FROM wines GROUP BY color").show(
 3. **Cleans**: empty strings become `NULL`, text is trimmed, HTML entities are unescaped,
    column names are translated from French to English snake_case, and IDs are stored as `VARCHAR`.
 4. **Filters**: only wines, and only reviews and picks that belong to one of those wines.
-5. **Derives** a few convenience columns (see below).
+5. **De-duplicates reviews**: reviews with the same `sku`, `author`, `review_date` and `content`
+   collapse to one row, keeping the lowest `review_id`. The build prints how many it dropped
+   (386 on the 2026-10-15 snapshot). Reviews with the same author, sku and date but different
+   text are all kept.
+6. **Derives** a few convenience columns (see below).
 
 ### `wines`
 
@@ -98,7 +102,8 @@ con.sql("SELECT color, count(*), median(price) FROM wines GROUP BY color").show(
 | `sku` | VARCHAR | Foreign key to `wines`. |
 | `rating`, `rating_pct` | DOUBLE, TINYINT | Star rating (out of 5) and the same value as a percentage. |
 | `title`, `content`, `author` | VARCHAR | Review text. Authors appear as first name plus initial. |
-| `review_date` | DATE | Date posted. |
+| `review_date` | DATE | Date posted, as published. Unreliable on the two bulk-import days (see `is_bulk_import_date`). |
+| `is_bulk_import_date` | BOOLEAN | `true` when `review_date` is 2021-07-15 or 2021-10-18, days on which SAQ bulk-imported older reviews. Those dates are the import day, not when the review was written. `review_date` itself is left unchanged. |
 | `language` | VARCHAR | `fr` (about 90 %) or `en`. |
 | `scraped_at` | TIMESTAMPTZ | Fetch time. |
 

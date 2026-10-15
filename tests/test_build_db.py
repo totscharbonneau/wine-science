@@ -72,10 +72,27 @@ def _product(sku, data, is_wine=1):
             200, is_wine, json.dumps({"sku": sku, **data}), int(sku))
 
 
+REVIEW_ROWS = [
+    (1, "1001", 90, 4.5, " Bon ", "Très bon", "Marie L.", "2026-01-02", "2026-10-15", "fr"),
+    (2, "2001", 50, 2.5, "x", "y", "Bob", "2026-01-02", "2026-10-15", "en"),
+    # exact duplicates: keep the lowest numeric id (9, not the string-smallest "10")
+    (100, "1002", 80, 4.0, "t", "Same text", "Dup D.", "2026-03-01", "2026-10-15", "fr"),
+    (9, "1002", 80, 4.0, "t", "Same text", "Dup D.", "2026-03-01", "2026-10-15", "fr"),
+    (10, "1002", 80, 4.0, "t", "Same text", "Dup D.", "2026-03-01", "2026-10-15", "fr"),
+    # same author, sku and date but different text: all kept
+    (20, "1002", 80, 4.0, "t", "First thoughts", "Twice T.", "2026-03-02", "2026-10-15", "fr"),
+    (21, "1002", 80, 4.0, "t", "Second thoughts", "Twice T.", "2026-03-02", "2026-10-15", "fr"),
+    # bulk-import days
+    (30, "1002", 60, 3.0, "t", "a", "Bulk A.", "2021-07-15", "2026-10-15", "fr"),
+    (31, "1002", 60, 3.0, "t", "b", "Bulk B.", "2021-10-18", "2026-10-15", "fr"),
+    (32, "1002", 60, 3.0, "t", "c", "Near N.", "2021-07-16", "2026-10-15", "fr"),
+    (33, "1002", 60, 3.0, "t", "d", "Undated U.", None, "2026-10-15", "fr"),
+]
+
+
 @pytest.fixture(scope="module")
-def con(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("build")
-    raw, out = tmp / "raw.db", tmp / "out.duckdb"
+def raw_db(tmp_path_factory):
+    raw = tmp_path_factory.mktemp("raw") / "raw.db"
 
     db = sqlite3.connect(raw)
     db.executescript(RAW_SCHEMA)
@@ -89,10 +106,7 @@ def con(tmp_path_factory):
     )
     db.executemany(
         "INSERT INTO customer_reviews VALUES (?,?,?,?,?,?,?,?,?,?)",
-        [
-            (1, "1001", 90, 4.5, " Bon ", "Très bon", "Marie L.", "2026-01-02", "2026-10-15", "fr"),
-            (2, "2001", 50, 2.5, "x", "y", "Bob", "2026-01-02", "2026-10-15", "en"),
-        ],
+        REVIEW_ROWS,
     )
     db.execute(
         "INSERT INTO employee_picks (sku, employee_id, pick_date, content, scraped_at)"
@@ -100,11 +114,21 @@ def con(tmp_path_factory):
     )
     db.commit()
     db.close()
+    return raw
 
-    build(raw, out)
+
+@pytest.fixture(scope="module")
+def con(raw_db, tmp_path_factory):
+    out = tmp_path_factory.mktemp("build") / "out.duckdb"
+    build(raw_db, out)
     c = duckdb.connect(str(out), read_only=True)
     yield c
     c.close()
+
+
+def review_ids(con, sku):
+    rows = con.execute("SELECT review_id FROM customer_reviews WHERE sku = ?", [sku]).fetchall()
+    return {r[0] for r in rows}
 
 
 def wine(con, sku, col):
@@ -116,8 +140,32 @@ def test_only_wines_kept(con):
 
 
 def test_reviews_and_picks_filtered_to_wines(con):
-    assert con.execute("SELECT review_id FROM customer_reviews").fetchall() == [("1",)]
+    assert review_ids(con, "2001") == set()
+    assert review_ids(con, "1001") == {"1"}
     assert con.execute("SELECT count(*) FROM employee_picks").fetchone()[0] == 1
+
+
+def test_exact_duplicate_reviews_keep_lowest_id(con):
+    ids = review_ids(con, "1002")
+    assert "9" in ids
+    assert not ids & {"10", "100"}
+
+
+def test_same_author_sku_date_different_content_kept(con):
+    assert {"20", "21"} <= review_ids(con, "1002")
+
+
+def test_bulk_import_flag(con):
+    flags = dict(con.execute("SELECT review_id, is_bulk_import_date FROM customer_reviews").fetchall())
+    assert flags["30"] is True and flags["31"] is True
+    assert flags["32"] is False and flags["33"] is False and flags["1"] is False
+    dates = dict(con.execute("SELECT review_id, review_date::VARCHAR FROM customer_reviews").fetchall())
+    assert dates["30"] == "2021-07-15" and dates["31"] == "2021-10-18"
+
+
+def test_build_reports_duplicates_dropped(raw_db, tmp_path, capsys):
+    build(raw_db, tmp_path / "again.duckdb")
+    assert "2 duplicate reviews dropped" in capsys.readouterr().out
 
 
 def test_unescape_html_entities(con):
@@ -138,7 +186,7 @@ def test_empty_and_whitespace_become_null_or_trimmed(con):
     assert wine(con, "1001", "region") is None
     assert wine(con, "1001", "producer") == "Domaine X"
     assert con.execute("SELECT content FROM employee_picks").fetchone()[0] is None
-    assert con.execute("SELECT title FROM customer_reviews").fetchone()[0] == "Bon"
+    assert con.execute("SELECT title FROM customer_reviews WHERE sku = '1001'").fetchone()[0] == "Bon"
 
 
 def test_rating_zero_is_null(con):

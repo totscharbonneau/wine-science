@@ -137,21 +137,36 @@ SELECT
 FROM parsed;
 """
 
-REVIEWS_SQL = """
+BULK_IMPORT_DATES = ("2021-07-15", "2021-10-18")
+
+REVIEWS_SQL = f"""
 CREATE OR REPLACE TABLE customer_reviews AS
+WITH cleaned AS (
+    SELECT
+        review_id                          AS review_num,
+        review_id::VARCHAR                 AS review_id,
+        sku,
+        rating_pct::TINYINT                AS rating_pct,
+        rating::DOUBLE                     AS rating,
+        nullif(trim(title), '')            AS title,
+        nullif(trim(content), '')          AS content,
+        nullif(trim(author), '')           AS author,
+        try_cast(review_date AS DATE)      AS review_date,
+        language,
+        try_cast(scraped_at AS TIMESTAMPTZ) AS scraped_at
+    FROM raw.customer_reviews
+    WHERE sku IN (SELECT sku FROM wines)
+)
 SELECT
-    review_id::VARCHAR                 AS review_id,
-    sku,
-    rating_pct::TINYINT                AS rating_pct,
-    rating::DOUBLE                     AS rating,
-    nullif(trim(title), '')            AS title,
-    nullif(trim(content), '')          AS content,
-    nullif(trim(author), '')           AS author,
-    try_cast(review_date AS DATE)      AS review_date,
-    language,
-    try_cast(scraped_at AS TIMESTAMPTZ) AS scraped_at
-FROM raw.customer_reviews
-WHERE sku IN (SELECT sku FROM wines);
+    * EXCLUDE (review_num),
+    -- two days when old reviews were bulk-imported; review_date is not the real posting date
+    coalesce(review_date IN ({', '.join(f"DATE '{d}'" for d in BULK_IMPORT_DATES)}), false)
+                                           AS is_bulk_import_date
+FROM cleaned
+-- exact duplicates (same sku, author, date, content) collapse to the lowest review id
+QUALIFY row_number() OVER (
+    PARTITION BY sku, author, review_date, content ORDER BY review_num
+) = 1;
 """
 
 PICKS_SQL = """
@@ -179,10 +194,15 @@ def build(raw_db: Path = RAW_DB, out_db: Path = OUT_DB) -> None:
     con.execute(f"ATTACH '{raw_db}' AS raw (TYPE sqlite, READ_ONLY)")
     for sql in (WINES_SQL, REVIEWS_SQL, PICKS_SQL):
         con.execute(sql)
+    wine_reviews = con.execute(
+        "SELECT count(*) FROM raw.customer_reviews WHERE sku IN (SELECT sku FROM wines)"
+    ).fetchone()[0]
     con.execute("DETACH raw")
     for t in ("wines", "customer_reviews", "employee_picks"):
         n = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         print(f"{t}: {n:,} rows")
+        if t == "customer_reviews":
+            print(f"{wine_reviews - n:,} duplicate reviews dropped")
     con.close()
 
 
