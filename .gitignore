@@ -1,5 +1,6 @@
 # Scraped SAQ data (not redistributable)
-data/
+data/*
+!data/.gitkeep
 
 # Private scraper and notes (kept local for now)
 scraper/
