@@ -4,6 +4,7 @@
 
 Reads  data/processed/winescience.duckdb   (read-only)
 Writes data/processed/wine_groups_<method>.parquet
+       data/processed/wine_groups_<method>_report.md   (checks and a hand-review sample)
 """
 
 import argparse
@@ -12,6 +13,7 @@ from pathlib import Path
 import duckdb
 
 from src import DATA_DIR
+from src.data.grouping_report import write_report
 
 DB = DATA_DIR / "processed" / "winescience.duckdb"
 OUT_DIR = DATA_DIR / "processed"
@@ -104,8 +106,11 @@ SELECT_SQL = {
 }
 
 
-def group_wines(db: Path = DB, out_dir: Path = OUT_DIR, method: str = "npc") -> Path:
-    """Write the SKU -> wine group mapping for `method` and return its path."""
+def group_wines(db: Path = DB, out_dir: Path = OUT_DIR, method: str = "npc", seed: int = 0) -> Path:
+    """Write the SKU -> wine group mapping and its report for `method`; return the mapping's path.
+
+    `seed` fixes the random sample of groups drawn for hand review.
+    """
     if method not in METHODS:
         raise ValueError(f"unknown method {method!r}; known: {', '.join(METHODS)}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,9 +133,10 @@ def group_wines(db: Path = DB, out_dir: Path = OUT_DIR, method: str = "npc") -> 
             " count(*) FILTER (WHERE kept_together), count(*) FILTER (WHERE ambiguous)"
             " FROM grouped"
         ).fetchone()
+        report = write_report(con, method, out_dir, seed)
     finally:
         con.close()
-    msg = f"{method}: {n_skus:,} SKUs in {n_groups:,} groups -> {out}"
+    msg = f"{method}: {n_skus:,} SKUs in {n_groups:,} groups -> {out} (report: {report.name})"
     if n_attached or n_together or n_ambiguous:
         msg += (
             f" (no-grape SKUs: {n_attached:,} attached to siblings, "
@@ -145,5 +151,6 @@ if __name__ == "__main__":
     ap.add_argument("--method", choices=sorted(METHODS), default="npc")
     ap.add_argument("--db", type=Path, default=DB)
     ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    ap.add_argument("--seed", type=int, default=0, help="seed for the hand-review sample")
     args = ap.parse_args()
-    group_wines(args.db, args.out_dir, args.method)
+    group_wines(args.db, args.out_dir, args.method, args.seed)
