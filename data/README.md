@@ -11,7 +11,8 @@ data/
 ├── exports/*.csv                    # flat dumps of the raw DB, regenerable, not used by the pipeline
 └── processed/
     ├── winescience.duckdb           # clean, typed database used for all analysis
-    └── wine_groups_<method>.parquet # SKU -> wine group mapping, one file per grouping method
+    ├── wine_groups_<method>.parquet # SKU -> wine group mapping, one file per grouping method
+    └── wine_groups_<method>_report.md # checks and hand-review sample for that method
 ```
 
 | Stage | Produced by | Notes |
@@ -143,6 +144,25 @@ Methods are listed in the `METHODS` registry in `src/data/group_wines.py`:
 |---|---|
 | `npc` | normalized name + producer + color. Bottle volume and descriptions are never part of the key, so vintages and magnums of one wine share a group, while a red and a white with the same name do not. |
 | `npcg` | `npc` key + normalized lead grape: the grape with the highest percentage in `grapes`, ties broken alphabetically so the key does not depend on listing order (a grape without a percentage counts as 0; a SKU with no `grapes` string falls back to `grape_primary`). A blend whose lead grape changes between vintages (e.g. Merlot 59 % vs Cabernet-sauvignon 52 %) is deliberately split. Normalization of the grape name: accents, case, hyphens and spacing folded; "Cabernet" = "Cabernet-sauvignon"; also Shiraz = Syrah, Sangiovese grosso = Sangiovese, Tinto fino = Tempranillo, Maccabeu = Macabeo. The placeholder "Autre (s) cépage (s)" is not a grape: it ranks by its percentage like one, but when it comes out on top the lead is unknown and the SKU counts as having no grape; it loses a tie to a real grape. A SKU with no grape joins its siblings' group when they agree on exactly one grape; stays with other grape-less SKUs when no sibling has a grape; stays in its own sub-group, and is counted as ambiguous in the run output, when siblings disagree. |
+
+### Grouping report and hand-review sample
+
+Every grouping run also writes `processed/wine_groups_<method>_report.md` for the method it ran,
+so the grouping can be checked by eye. Sections:
+
+- **Group size distribution** and the **largest groups** (top 20).
+- **Groups mixing grapes, regions or volumes**: count of groups with more than one distinct lead
+  grape, region or `volume_ml`, and the 20 largest. Mixed volumes are expected (a magnum belongs
+  with its 750 ml sibling); mixed grapes or regions are the ones to look at.
+- **Groups with divergent descriptions**: groups where two SKUs' `description` texts share less
+  than 20 % of their words (Jaccard on words of 3+ letters), least similar first. This is
+  evidence the key does not use, e.g. two unrelated wines under one name.
+- For `npcg` only, **attached** and **ambiguous** no-grape SKUs, with their group keys. SKUs kept
+  together because no sibling has a grape are only counted in the run output.
+- **Hand-review sample**: 25 random groups of 2+ SKUs, each shown with its SKUs' name, volume,
+  region, lead grape and description. Singletons are left out since there is nothing in them to
+  confirm. The draw is seeded (`--seed`, default 0), so the same seed and data give the same
+  sample; pass another seed for a fresh one.
 
 ## Known limitations
 

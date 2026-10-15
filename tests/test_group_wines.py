@@ -31,9 +31,12 @@ def db(tmp_path):
     con = duckdb.connect(str(path))
     con.execute(
         "CREATE TABLE wines (sku VARCHAR, name VARCHAR, producer VARCHAR, color VARCHAR,"
-        " volume_ml INTEGER, description VARCHAR)"
+        " volume_ml INTEGER, description VARCHAR, region VARCHAR, grape_primary VARCHAR, grapes VARCHAR)"
     )
-    con.executemany("INSERT INTO wines VALUES (?,?,?,?,?,?)", WINES)
+    con.executemany(
+        "INSERT INTO wines (sku, name, producer, color, volume_ml, description) VALUES (?,?,?,?,?,?)",
+        WINES,
+    )
     con.close()
     return path
 
@@ -169,13 +172,13 @@ def grape_db(tmp_path):
     con = duckdb.connect(str(path))
     con.execute(
         "CREATE TABLE wines (sku VARCHAR, name VARCHAR, producer VARCHAR, color VARCHAR,"
-        " volume_ml INTEGER, description VARCHAR, grape_primary VARCHAR, grapes VARCHAR)"
+        " volume_ml INTEGER, description VARCHAR, region VARCHAR, grape_primary VARCHAR, grapes VARCHAR)"
     )
     con.executemany(
-        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,?,NULL)", GRAPE_WINES
+        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,NULL,?,NULL)", GRAPE_WINES
     )
     con.executemany(
-        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,split_part(?, ' ', 1),?)",
+        "INSERT INTO wines VALUES (?,?,?,?,750,NULL,NULL,split_part(?, ' ', 1),?)",
         [(*w, w[4]) for w in BLEND_WINES],
     )
     con.close()
@@ -275,6 +278,82 @@ def test_npcg_reports_no_grape_outcomes(grape_db, tmp_path, capsys):
     out = capsys.readouterr().out
     # a2, the junk-grape j2 and the placeholder-led u2 attach; n1/n2 stay together; d3/d4 are ambiguous
     assert "3 attached to siblings, 2 kept together, 2 ambiguous" in out
+
+
+# Grouping report. Seeded false merge under npc: a red blend and a white varietal, in different
+# regions, share a name, producer and color, with unrelated descriptions. The honest group ("Good")
+# is a vintage pair that should not be flagged.
+REPORT_WINES = [
+    # sku, name, producer, color, volume_ml, description, region, grape_primary, grapes
+    ("r1", "Reserve", "Dom R", "Rouge", 750, "Rouge charpente aux tanins souples et fruits noirs", "Bordeaux", "Merlot", "Merlot 60 %, Syrah 40 %"),
+    ("r2", "Reserve", "Dom R", "Rouge", 750, "Blanc vif, agrumes frais et finale minerale", "Loire", "Sauvignon blanc", "Sauvignon blanc 100 %"),
+    ("k1", "Good", "Dom G", "Blanc", 750, "Blanc vif aux notes d'agrumes frais", "Loire", "Chenin", "Chenin 100 %"),
+    ("k2", "Good", "Dom G", "Blanc", 1500, "Blanc vif aux notes d'agrumes frais", "Loire", "Chenin", "Chenin 100 %"),
+]
+
+
+def report_sections(path):
+    """Split the markdown report into {heading: text} at level-2 headings."""
+    parts = path.read_text().replace("\\|", "|").split("\n## ")[1:]
+    return {p.split("\n", 1)[0]: p for p in parts}
+
+
+@pytest.fixture
+def report_db(tmp_path):
+    path = tmp_path / "report.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(
+        "CREATE TABLE wines (sku VARCHAR, name VARCHAR, producer VARCHAR, color VARCHAR,"
+        " volume_ml INTEGER, description VARCHAR, region VARCHAR, grape_primary VARCHAR, grapes VARCHAR)"
+    )
+    con.executemany("INSERT INTO wines VALUES (?,?,?,?,?,?,?,?,?)", REPORT_WINES)
+    con.close()
+    return path
+
+
+def test_report_written_for_every_method(db, grape_db, tmp_path):
+    for method in METHODS:
+        group_wines(grape_db, tmp_path / "out", method)
+        assert (tmp_path / "out" / f"wine_groups_{method}_report.md").exists()
+
+
+def test_report_flags_a_seeded_false_merge(report_db, tmp_path):
+    group_wines(report_db, tmp_path / "out", "npc")
+    sections = report_sections(tmp_path / "out" / "wine_groups_npc_report.md")
+    bad, good = "reserve|dom r|rouge", "good|dom g|blanc"
+    assert bad in sections["Groups mixing grapes"]
+    assert bad in sections["Groups mixing regions"]
+    assert bad in sections["Groups with divergent descriptions"]
+    # a vintage pair differing only in bottle size is not a false merge
+    assert good not in sections["Groups mixing grapes"]
+    assert good not in sections["Groups mixing regions"]
+    assert good not in sections["Groups with divergent descriptions"]
+    assert good in sections["Groups mixing volumes"]
+
+
+def test_report_lists_size_distribution_and_largest(report_db, tmp_path):
+    group_wines(report_db, tmp_path / "out", "npc")
+    sections = report_sections(tmp_path / "out" / "wine_groups_npc_report.md")
+    assert "| 2 | 2 |" in sections["Group size distribution"]
+    assert "reserve|dom r|rouge" in sections["Largest groups (top 20)"]
+
+
+def test_npcg_report_lists_attached_and_ambiguous(grape_db, tmp_path):
+    group_wines(grape_db, tmp_path / "out", "npcg")
+    sections = report_sections(tmp_path / "out" / "wine_groups_npcg_report.md")
+    attached = sections["Attached no-grape SKUs"]
+    ambiguous = sections["Ambiguous no-grape SKUs"]
+    assert "| a2 |" in attached and "| d3 |" in ambiguous and "| d4 |" in ambiguous
+    assert "| d3 |" not in attached
+
+
+def test_report_sample_is_seeded_and_covers_multi_sku_groups(report_db, tmp_path):
+    group_wines(report_db, tmp_path / "a", "npc", seed=1)
+    group_wines(report_db, tmp_path / "b", "npc", seed=1)
+    a = report_sections(tmp_path / "a" / "wine_groups_npc_report.md")["Hand-review sample"]
+    b = report_sections(tmp_path / "b" / "wine_groups_npc_report.md")["Hand-review sample"]
+    assert a == b
+    assert "### `reserve|dom r|rouge`" in a and "### `good|dom g|blanc`" in a
 
 
 def test_unknown_method_rejected(db, tmp_path):
