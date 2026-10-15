@@ -19,7 +19,7 @@ def _(DATA_DIR, duckdb):
     return (con,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(con, mo, wines):
     _df = mo.sql(
         f"""
@@ -31,7 +31,31 @@ def _(con, mo, wines):
 
 
 @app.cell
-def _():
+def _(con, mo, wines):
+    _df = mo.sql(
+        f"""
+        SELECT SUM(dup_wines) from( SELECT COUNT(*) as dup_wines , "name"
+        FROM wines
+        group by "name"
+        HAVING COUNT(*) > 1 )
+        as total_dupewines
+
+
+        """,
+        engine=con
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(con, mo, wines):
+    _df = mo.sql(
+        f"""
+        SELECT * FROM wines
+        WHERE "name" = 'Ornellaia'
+        """,
+        engine=con
+    )
     return
 
 
