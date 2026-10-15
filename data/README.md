@@ -9,13 +9,16 @@ The data files themselves are not committed (see `.gitignore`); this document de
 data/
 ├── raw/saq.db                       # immutable scrape (SQLite), never edited by hand
 ├── exports/*.csv                    # flat dumps of the raw DB, regenerable, not used by the pipeline
-└── processed/winescience.duckdb     # clean, typed database used for all analysis
+└── processed/
+    ├── winescience.duckdb           # clean, typed database used for all analysis
+    └── wine_groups_<method>.parquet # SKU -> wine group mapping, one file per grouping method
 ```
 
 | Stage | Produced by | Notes |
 |---|---|---|
 | `raw/saq.db` | `scraper/saq_scraper.py` (local, not in the repo) | Read-only between scrapes. Wine attributes are stored as a JSON blob in `products.data`. |
 | `processed/winescience.duckdb` | `uv run python -m src.data.build_db` | Rebuilt from scratch on every run. |
+| `processed/wine_groups_<method>.parquet` | `uv run python -m src.data.group_wines --method npc` | Run after the build. Reads the database read-only. |
 
 Scrape dates: 2026-09-30 to 2026-10-15. Row counts below are from the 2026-10-15 build and
 will change with a re-scrape.
@@ -118,6 +121,27 @@ con.sql("SELECT color, count(*), median(price) FROM wines GROUP BY color").show(
 | `pick_date` | DATE | Date of the pick. |
 | `content` | VARCHAR | The recommendation text (French). |
 | `scraped_at` | TIMESTAMPTZ | Fetch time. |
+
+## Wine groups
+
+SAQ sells each vintage and bottle size as its own SKU. A **wine group** is a key that ties
+together the SKUs of the same wine. The grouping step assigns every SKU to a group (singletons
+included) and writes one parquet file per grouping method, `processed/wine_groups_<method>.parquet`:
+
+| Column | Type | Description |
+|---|---|---|
+| `sku` | VARCHAR | Appears exactly once. Joins to `wines.sku`. |
+| `group_id` | VARCHAR | First 16 hex characters of the MD5 of `group_key`. Deterministic, so ids survive rebuilds and re-scrapes as long as the key is unchanged. |
+| `group_key` | VARCHAR | The readable normalized key, e.g. `chateau test|domaine x|rouge`. |
+
+Normalization (lowercase, strip accents, trim and collapse whitespace; NULL becomes empty) applies
+to the key only. The stored columns in `wines` are never changed.
+
+Methods are listed in the `METHODS` registry in `src/data/group_wines.py`:
+
+| Method | Key |
+|---|---|
+| `npc` | normalized name + producer + color. Bottle volume and descriptions are never part of the key, so vintages and magnums of one wine share a group, while a red and a white with the same name do not. |
 
 ## Known limitations
 
