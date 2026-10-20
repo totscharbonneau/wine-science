@@ -145,6 +145,14 @@ Methods are listed in the `METHODS` registry in `src/data/group_wines.py`:
 | `npc` | normalized name + producer + color. Bottle volume and descriptions are never part of the key, so vintages and magnums of one wine share a group, while a red and a white with the same name do not. |
 | `npcg` | `npc` key + normalized lead grape: the grape with the highest percentage in `grapes`, ties broken alphabetically so the key does not depend on listing order (a grape without a percentage counts as 0; a SKU with no `grapes` string falls back to `grape_primary`). A blend whose lead grape changes between vintages (e.g. Merlot 59 % vs Cabernet-sauvignon 52 %) is deliberately split. Normalization of the grape name: accents, case, hyphens and spacing folded; "Cabernet" = "Cabernet-sauvignon"; also Shiraz = Syrah, Sangiovese grosso = Sangiovese, Tinto fino = Tempranillo, Maccabeu = Macabeo. The placeholder "Autre (s) cépage (s)" is not a grape: it ranks by its percentage like one, but when it comes out on top the lead is unknown and the SKU counts as having no grape; it loses a tie to a real grape. A SKU with no grape joins its siblings' group when they agree on exactly one grape; stays with other grape-less SKUs when no sibling has a grape; stays in its own sub-group, and is counted as ambiguous in the run output, when siblings disagree. |
 
+Which method to use:
+
+- **`npc` to split data for modeling.** It never separates one wine's vintages, so they cannot land
+  on both sides of a split. It can put a few different wines under one generic name in one group,
+  which only makes a fold slightly bigger.
+- **`npcg` to analyze per wine.** It keeps different blends apart. It also splits a wine whose lead
+  grape changes between vintages, or whose grape list is cut short on one SKU.
+
 ### Grouping report and hand-review sample
 
 Every grouping run also writes `processed/wine_groups_<method>_report.md` for the method it ran,
@@ -172,10 +180,19 @@ so the grouping can be checked by eye. Sections:
   not parseable from names or descriptions.
 - **Possible duplicates.** The same wine can appear under several SKUs (formats, vintages).
   Group by producer and name before splitting data for modeling, to avoid leakage.
-- **Wine groups are approximate.** `npcg` splits a wine whose lead grape changes between vintages
-  (about 85 npc keys, mostly Bordeaux blends flipping between Cabernet-sauvignon and Merlot), and
-  a few npc keys hold unrelated wines under one name (e.g. a red blend and a 100 % Sauvignon
-  blanc), which `npcg` separates only because their lead grapes differ.
+- **Wine groups are approximate.** Numbers are from the 2026-10-15 snapshot; the cases are traced
+  in `notebooks/data/issue7.py`.
+  - 81 of the 2,655 `npc` keys with several SKUs have more than one lead grape, so `npcg` splits
+    them. In 63 it is one wine whose blend changes between vintages (Bordeaux and Tuscan blends,
+    for example).
+  - The other 18 keys hold SKUs that share no grape. The causes are a wrong `color` or `grapes`
+    value on SAQ's page at scrape time (SAQ has corrected some since: 6 of the 77 SKUs
+    re-fetched on 2026-10-20 had changed), a grape list cut short so the lead flips, a generic
+    name covering different wines (e.g. Domaine des Tours "vin de pays"), and a few cases the data
+    cannot settle. `npcg` separates unrelated wines here only because their lead grapes differ.
+  - 380 more keys have different grape sets but the same lead grape, so `npcg` keeps them
+    together. The ones with the least grape overlap are vintage blend shifts, not unrelated wines.
+  - These are not fixed: a full re-scrape should correct some of the wrong values.
 - **Prices describe the catalog**, not just what is on the shelf: most listed wines are out of
   stock at any given time.
 - **Text is mostly French**; reviews are about 90 % French.
