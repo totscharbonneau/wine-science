@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=26.0.0",
     "selectolax>=0.4.13,<1.0",
     "sqlglot>=30.23.0",
+    "stop-words>=2025.11.4",
 ]
 
 [build-system]
